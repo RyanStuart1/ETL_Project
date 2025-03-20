@@ -7,9 +7,38 @@ from airflow import DAG
 from airflow.operators.bash import BashOperator
 from airflow.operators.python import PythonOperator
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import logging
+
+
+def clean_userAgent(user_agent):
+    # Reduces user agent to the browser
+
+    # not in ua ensures that the chrome is used as edge is built into chromium,
+    # same applies to safari as it is based on a chrome WebKit.
+
+    ua = user_agent.lower()
+    if "chrome" in ua and "edge" not in ua:
+        return "chrome"
+    elif "firefox" in ua:
+        return "firefox"
+    elif "safari" in ua and "chrome" not in ua:
+        return "safari"
+    elif "edge" in ua:
+        return "edge"
+    elif "googlebot" in ua:
+        return "googlebot"
+    elif "bingbot" in ua:
+        return "bingbot"
+    elif "yandex" in ua:
+        return "yandexbot"
+    elif "mozilla" in ua:
+        return "mozilla"
+    else:
+        return ua.split(" ")[0]
 
 # define (local) folders where files will be found / copied / staged / written
-WorkingDirectory = "/home/craig/w3c"
+WorkingDirectory = "/home/ryan/w3c"
 LogFiles = WorkingDirectory + "/LogFiles/"
 StagingArea = WorkingDirectory + "/StagingArea/"
 StarSchema = WorkingDirectory + "/StarSchema/"
@@ -20,6 +49,12 @@ uniqIPsCommand = "sort -u " + StagingArea + "RawIPAddresses.txt > " + StagingAre
 
 # Another BASH command, this time to extract unique Date values from one file into another
 uniqDatesCommand = "sort -u " + StagingArea + "RawDates.txt > " + StagingArea + "UniqueDates.txt"
+
+# BASH command for file paths
+uniqURICommand = "sort -u " + StagingArea + "RawURIStems.txt > " + StagingArea + "UniqueURIStems.txt"
+
+# BASH command for status of requests
+uniqStatusCommand = "sort -u " + StagingArea + "RawStatus.txt > " + StagingArea + "UniqueStatus.txt"
 
 # Another BASH command, this time to copy the Fact Table that is produced from the Staging area to the resultant folder
 copyFactTableCommand = "cp " + StagingArea + "FactTable.txt " + StarSchema + "FactTable.txt"
@@ -154,12 +189,17 @@ def Add14ColDataToFactTable():
         Split=line.split(" ")
 
         # among other things, the line of data has the following: Date,Time,Browser,IP,ResponseTime
-
         # do some reformatting of the browser field if required, to remove ',' chars from it
-        Browser = Split[9].replace(",","")
+        User_agent = Split[9].replace(",","")
+
+        Browser = clean_userAgent(User_agent)
+
+        uriStem = Split[4]
+
+        Status_code = Split[10]
 
         # create line of text to write to output file, made up of the following: Date,Time,Browser,IP,ResponseTime
-        OutputLine = Split[0] + "," + Split[1] + "," + Browser + "," + Split[8] + "," +Split[13] + "\n"
+        OutputLine = Split[0] + "," + Split[1] + "," + Browser + "," + Split[8] + "," + Split[13] + "," + uriStem + "," + "0," + "0," + Status_code + "\n"
 
         # write line of text to output file
         OutFact1.write(OutputLine)
@@ -181,10 +221,20 @@ def Add18ColDataToFactTable():
         Split = line.split(" ")
 
         # do some reformatting of the browser field
-        Browser = Split[9].replace(",", "")
+        User_agent = Split[9].replace(",","")
+
+        Browser = clean_userAgent(User_agent)
+
+        uriStem = Split[4]
+
+        server_Bytes = Split[15]
+
+        client_Bytes = Split [16]
+
+        Status_code = Split[12]
 
         # create line of text to write to output file, made up of the following: Date,Time,Browser,IP,ResponseTime
-        Out = Split[0] + "," + Split[1] + "," + Browser + "," + Split[8] + "," + Split[16] + "\n"
+        Out = Split[0] + "," + Split[1] + "," + Browser + "," + Split[8] + "," + Split[16] + "," + uriStem + "," + server_Bytes + "," + client_Bytes + "," + Status_code + "\n"
 
         # write line of text to output file
         OutFact1.write(Out)
@@ -193,7 +243,7 @@ def Add18ColDataToFactTable():
 def BuildFactTable():
     # write header row into the fact table
     with open(StagingArea + 'FactTable.txt', 'w') as file:
-        file.write("Date,Time,Browser,IP,ResponseTime\n")
+        file.write("Date,Time,Browser,IP,ResponseTime,File,client_Bytes,Server_Bytes,StatusCode\n")
 
     # add / append data from 14-col log files into Fact table
     Add14ColDataToFactTable()
@@ -223,18 +273,20 @@ def getIPsFromFactTable():
 
     # for each line / row of data
     for line in Lines:
-        if firstLine == True:
+        if firstLine:
             # ignore this line, but record we have found it now
             firstLine = False
         else:
             # split the line into its parts
-            Split = line.split(",")
+            Split = line.strip().split(",")
 
-            # get the IP address within the parts of the line
-            IPAddr = Split[3] + "\n"
+            # ensure there are enough columns to avoid errors
+            if len(Split) > 3:
+                # get the IP address within the parts of the line
+                IPAddr = Split[3].strip()  # Stripping extra spaces/newlines
 
-            # write IP address to output file
-            OutputFile.write(IPAddr)
+                # write IP address to output file
+                OutputFile.write(IPAddr + "\n")
 
 # copy / extract all dates from the Fact Table
 # eventually, these will be used to create and populate
@@ -271,6 +323,52 @@ def getDatesFromFactTable():
 
             # write data to output file
             OutputFile.write(DateInfo)
+
+def getURIStemsFromFactTable():
+    with open(StagingArea + 'FactTable.txt', 'r') as infile:
+        lines = infile.readlines()
+    
+    with open(StagingArea + 'RawURIStems.txt', 'w') as outfile:
+        first_line = True
+        for line in lines:
+            if first_line:
+                first_line = False
+                continue
+            # Expected order: Date,Time,Browser,IP,ResponseTime,cs-uri-stem
+            parts = line.strip().split(',')
+            if len(parts) >= 6:
+                uri_stem = parts[5].strip()
+                outfile.write(uri_stem + "\n")
+
+
+def getStatusFromFactTable():
+    with open(StagingArea + 'FactTable.txt', 'r') as infile:
+        lines = infile.readlines()
+    
+    with open(StagingArea + 'RawStatus.txt', 'w') as outfile:
+        first_line = True
+        count = 0
+        for line in lines:
+            if first_line:
+                first_line = False
+                continue
+            parts = line.strip().split(',')
+            # Check the number of columns
+            if len(parts) == 7:
+                # For 14-col log rows, status code is at index 6
+                status = parts[6].strip()
+            elif len(parts) == 9:
+                # For 18-col log rows, status code is at index 8
+                status = parts[8].strip()
+            else:
+                # If unexpected number of fields, skip or handle accordingly
+                continue
+
+            outfile.write(status + "\n")
+            count += 1
+        print("DEBUG: Number of status entries written:", count)
+
+
 
 # define days of the week - used in routine(s) below
 Days=["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
@@ -317,66 +415,127 @@ def makeDateDimension():
             except:
                 print("Error with Date") # report error in case of exception
 
-# create / build a dimension table for the 'location' information derived from IP addresses
+
+
+
 def makeLocationDimension():
-    # define path to the file that will store the location dimension
+    """Fetch geolocation data for unique IPs in parallel and store the results."""
     DimTablename = StarSchema + 'DimIPLoc.txt'
+    ip_file_path = StagingArea + 'UniqueIPAddresses.txt'
 
-    # is the following needed?
-    # try:
-    #    file_stats = os.stat(DimTablename)
-    #
-    #    if (file_stats.st_size >2):
-    #       print("Dim IP Table Exists")
-    #       return
-    # except:
-    #    print("Dim IP Table does not exist, creating one")    
+    logging.info(f"Checking file: {ip_file_path}")
+
+    # Ensure the source file exists
+    if not os.path.exists(ip_file_path):
+        logging.error(f"File {ip_file_path} not found. Exiting task.")
+        return
+
+    # Read unique IPs
+    with open(ip_file_path, 'r') as infile:
+        ip_addresses = [line.strip() for line in infile if line.strip()]
+
+    if not ip_addresses:
+        logging.warning("No IP addresses found to process. Skipping task.")
+        return
+
+    logging.info(f"Found {len(ip_addresses)} IP addresses.")
+
+    # Ensure we can write to DimIPLoc.txt
+    try:
+        with open(DimTablename, 'w') as file:
+            file.write("IP, country_code, country_name, city, postal, lat, long\n")
+        os.chmod(DimTablename, 0o777)
+    except OSError:
+        logging.error(f"Cannot write to {DimTablename}. Check file permissions.")
+        return
+
+    # Function to process an IP
+    def fetch_geolocation(ip):
+        """Fetches geolocation data for an IP address."""
+        url = f'https://geolocation-db.com/jsonp/{ip}'
+        try:
+            response = requests.get(url, timeout=5)  
+            result = response.content.decode()
+
+            # Parse JSON response
+            result = result.split("(")[1].strip(")")
+            result = json.loads(result)
+
+            return f"{ip},{result.get('country_code', '')},{result.get('country_name', '')},{result.get('city', '')},{result.get('postal', '')},{result.get('latitude', '')},{result.get('longitude', '')}\n"
+        except requests.exceptions.RequestException as e:
+            logging.error(f"API request failed for {ip}: {e}")
+            return None
+
+    # Process IPs in parallel using ThreadPoolExecutor
+    max_workers = 10  
+    results = []
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_ip = {executor.submit(fetch_geolocation, ip): ip for ip in ip_addresses}
+
+        for future in as_completed(future_to_ip):
+            data = future.result()
+            if data:
+                results.append(data)
+
+    # Write results to file
+    if results:
+        with open(DimTablename, 'a') as file:
+            file.writelines(results)
+        logging.info(f"Location Dimension Table Created with {len(results)} entries.")
+    else:
+        logging.warning("No results were written to the file.")
+
+def makeRequestDimension():
+    DimTablename = StarSchema + 'DimRequest.txt'
+    unique_uris_path = StagingArea + 'UniqueURIStems.txt'
     
-    # open file in staging area that contains the uniquie IP addresses extracted from the Fact table
-    InFile = open(StagingArea + 'UniqueIPAddresses.txt', 'r')
-    #    OutFile=open(StarSchema + 'DimIPLoc.txt', 'w') <- needed?
-
-    # write a header row into the output file for constituent parts of the location
-    with open(StarSchema + 'DimIPLoc.txt', 'w') as file:
-               file.write("IP, country_code, country_name, city, lat, long\n")
+    # ensure the filepath of unique URIs
+    if not os.path.exists(unique_uris_path):
+        print(f"File {unique_uris_path} not found. Cannot build Request dimension.")
+        return
     
-    # read in lines / IP addresses from file
-    Lines = InFile.readlines()
+    # Write header
+    with open(DimTablename, 'w') as outfile:
+        outfile.write("Request_key,URIStem\n")
+    
+    # Read each unique URI and assign a key
+    with open(unique_uris_path, 'r') as infile, open(DimTablename, 'a') as outfile:
+        Request_key = 1
+        for line in infile:
+            uri = line.strip()
+            if uri:
+                # Write surrogate key + the URI
+                out_line = f"{Request_key},{uri}\n"
+                outfile.write(out_line)
+                Request_key += 1
 
-    # for each line / IP address in the file
-    for line in Lines:
-        # remove any new line from it
-        line = line.replace("\n","")
+    print("Request Dimension Table created.")
 
-        # if the line isn't empty
-        if (len(line) > 0):
-            # define URL of API to send the IP address to, in return for detailed location information
-            request_url = 'https://geolocation-db.com/jsonp/' + line
+def makeStatusDimension():
+    DimTablename = StarSchema + 'DimStatusCode.txt'
+    unique_status_path = StagingArea + 'UniqueStatus.txt'
+    
+    if not os.path.exists(unique_status_path):
+        print(f"File {unique_status_path} not found. Cannot build Status dimension.")
+        return
+    
+    # Write header row for the dimension table
+    with open(DimTablename, 'w') as outfile:
+        outfile.write("Status_key,sc-status\n")
+    
+    # Read each unique status and assign a key
+    with open(unique_status_path, 'r') as infile, open(DimTablename, 'a') as outfile:
+        Status_key = 1
+        for line in infile:
+            status = line.strip()
+            if status:
+                out_line = f"{Status_key},{status}\n"
+                outfile.write(out_line)
+                Status_key += 1
+    print("Status Dimension Table created.")
 
-            # Send request and decode the result
-            try:
-                response = requests.get(request_url)
-                result = response.content.decode()
-            except:
-                print ("Error reponse from geolocation API: " + result)
-            
-            # process the response
-            try:
-                # Clean the returned string so it just contains the location data for the IP address
-                result = result.split("(")[1].strip(")")
-                
-                # Convert the location data into a dictionary so that individual fields can be extracted
-                result  = json.loads(result)
 
-                # create line of text to write to output file representing the location Dimension
-                # each line / row will have the original IP address [key], country code, country name, city, lat, long
-                outputLine = line + "," + str(result["country_code"]) + "," + str(result["country_name"]) + "," + str(result["city"]) + "," + str(result["latitude"]) + "," + str(result["longitude"]) + "\n"
-
-                # write / append the line to the output file
-                with open(StarSchema + 'DimIPLoc.txt', 'a') as file:
-                    file.write(outputLine)
-            except:
-                print ("error getting location")
 
 # the DAG - required for Apache Airflow
 dag = DAG(                                                     
@@ -408,6 +567,20 @@ task_getDatesFromFactTable = PythonOperator(
     dag=dag,
 )
 
+# A python operator to copy / extract filepath information from the Fact table
+task_getURIStemsFromFactTable = PythonOperator(
+    task_id="task_getURIStemsFromFactTable",
+    python_callable=getURIStemsFromFactTable,
+    dag=dag,
+)
+
+# A python operator to copy / extract status code information from the Fact table
+task_getStatusFromFactTable = PythonOperator(
+    task_id="task_getStatusFromFactTable",
+    python_callable=getStatusFromFactTable,
+    dag=dag,
+)
+
 # A python operator to build the Location Dimension based on IP addresses
 task_makeLocationDimension = PythonOperator(
     task_id="task_makeLocationDimension",
@@ -429,6 +602,19 @@ task_makeDateDimension = PythonOperator(
    dag=dag,
 )
 
+# A python operator to build the Request path Dimension based on filepath information
+task_makeRequestDimension = PythonOperator(
+    task_id="task_makeRequestDimension",
+    python_callable=makeRequestDimension,
+    dag=dag,
+)
+
+# A python operator to build the Status code Dimension based on status request information
+task_makeStatusDimension = PythonOperator(
+    task_id="task_makeStatusDimension",
+    python_callable=makeStatusDimension,
+    dag=dag,
+)
 # A bash operator that will transform the complete list of original IP addresses into
 # a file containing only unique IP addresses
 task_makeUniqueIPs = BashOperator(
@@ -445,6 +631,21 @@ task_makeUniqueDates = BashOperator(
     dag=dag,
 )
 
+# A bash operator that will transform the complete list of URI Stems into
+# a file containing only unique URI Stems
+task_makeUniqueURIStems = BashOperator(
+    task_id="task_makeUniqueURIStems",
+    bash_command=uniqURICommand,
+    dag=dag,
+)
+
+# A bash operator that will transform the complete list of Status codes into
+# a file containing only unique status codes
+task_makeUniqueStatus = BashOperator(
+    task_id="task_makeUniqueStatus",
+    bash_command=uniqStatusCommand,
+    dag=dag,
+)
 # a bash operator that will copy the Fact table from its temporary location in the 
 # Staging Area (where it is used during the creation of Dimension tables) into the Star Schema location
 task_copyFactTable = BashOperator(
@@ -481,15 +682,22 @@ task_copyFactTable = BashOperator(
 
 task_copyFactTable.set_upstream(task_makeDateDimension)
 task_copyFactTable.set_upstream(task_makeLocationDimension)
+task_copyFactTable.set_upstream(task_makeRequestDimension)
+task_copyFactTable.set_upstream(task_makeStatusDimension)
 
 task_makeDateDimension.set_upstream(task_makeUniqueDates)
 task_makeLocationDimension.set_upstream(task_makeUniqueIPs)
+task_makeRequestDimension.set_upstream(task_makeUniqueURIStems)
+task_makeStatusDimension.set_upstream(task_makeUniqueStatus)
 
 task_makeUniqueDates.set_upstream(task_getDatesFromFactTable)
 task_makeUniqueIPs.set_upstream(task_getIPsFromFactTable)
+task_makeUniqueURIStems.set_upstream(task_getURIStemsFromFactTable)
+task_makeUniqueStatus.set_upstream(task_getStatusFromFactTable)
 
 task_getDatesFromFactTable.set_upstream(task_BuildFactTable)
 task_getIPsFromFactTable.set_upstream(task_BuildFactTable)
+task_getURIStemsFromFactTable.set_upstream(task_BuildFactTable)
+task_getStatusFromFactTable.set_upstream(task_BuildFactTable)
 
 task_BuildFactTable.set_upstream(task_CopyLogFilesToStagingArea)
-
