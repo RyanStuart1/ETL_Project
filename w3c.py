@@ -9,7 +9,9 @@ from airflow.operators.python import PythonOperator
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
-
+from airflow.hooks.postgres_hook import PostgresHook
+import re
+#from airflow.providers.postgres.operators.postgres import PostgresOperator
 
 def clean_userAgent(user_agent):
     # Reduces user agent to the browser
@@ -32,6 +34,8 @@ def clean_userAgent(user_agent):
         return "bingbot"
     elif "yandex" in ua:
         return "yandexbot"
+    elif "Orgybybot":
+        return "Orgybot"
     elif "mozilla" in ua:
         return "mozilla"
     else:
@@ -57,7 +61,7 @@ uniqURICommand = "sort -u " + StagingArea + "RawURIStems.txt > " + StagingArea +
 uniqStatusCommand = "sort -u " + StagingArea + "RawStatus.txt > " + StagingArea + "UniqueStatus.txt"
 
 # Another BASH command, this time to copy the Fact Table that is produced from the Staging area to the resultant folder
-copyFactTableCommand = "cp " + StagingArea + "FactTable.txt " + StarSchema + "FactTable.txt"
+copyFactTableCommand = "cp " + StagingArea + "FactTable.txt " + StarSchema + "FactTable_Cleaned.txt"
 
 # prior to any processing, make sure the expected directory structure is in place for files
 try:   
@@ -181,12 +185,17 @@ def Add14ColDataToFactTable():
     OutFact1 = open(StagingArea + 'FactTable.txt', 'a')
 
     # read in all lines of data from input file (14-col data)
-    Lines= InFile.readlines()
+    Lines = InFile.readlines()
 
     # for each line in the input file
     for line in Lines:
+        line = line.strip()
         # split line into columns
-        Split=line.split(" ")
+        Split = line.split(" ")
+
+        if len(Split) < 14:  # Ensure there are at least 14 columns
+            print(f"Skipping malformed row: {line}")
+            continue
 
         # among other things, the line of data has the following: Date,Time,Browser,IP,ResponseTime
         # do some reformatting of the browser field if required, to remove ',' chars from it
@@ -194,15 +203,26 @@ def Add14ColDataToFactTable():
 
         Browser = clean_userAgent(User_agent)
 
-        uriStem = Split[4]
+        uri_Stem = re.sub(r'[\[\]]', '', Split[4].strip())
+        uri_Stem_cleaned = uri_Stem.split(',')[0].strip()
 
-        Status_code = Split[10]
+        status_Code = Split[10]
 
         # create line of text to write to output file, made up of the following: Date,Time,Browser,IP,ResponseTime
-        OutputLine = Split[0] + "," + Split[1] + "," + Browser + "," + Split[8] + "," + Split[13] + "," + uriStem + "," + "0," + "0," + Status_code + "\n"
+        OutputLine = ",".join([
+            Split[0].strip(),                # Date
+            Split[1].strip(),                # Time
+            Browser.strip(),                 # Cleaned Browser
+            Split[8].strip(),                # IP
+            Split[13].strip(),               # ResponseTime
+            uri_Stem_cleaned.strip(),        # URI 
+            "0",                             # Client Bytes
+            "0",                             # Server Bytes
+            status_Code.strip()              # Status code
+        ])
 
         # write line of text to output file
-        OutFact1.write(OutputLine)
+        OutFact1.write(OutputLine + "\n")
 
 # add / append data from the 18-col files into the Fact table
 def Add18ColDataToFactTable():
@@ -214,10 +234,11 @@ def Add18ColDataToFactTable():
 
     # read in all lines of data from input file (18-col data)
     Lines = InFile.readlines()
-
     # for each line in the input file
     for line in Lines:
         # split line into columns
+        line = line.strip()
+        
         Split = line.split(" ")
 
         # do some reformatting of the browser field
@@ -225,25 +246,35 @@ def Add18ColDataToFactTable():
 
         Browser = clean_userAgent(User_agent)
 
-        uriStem = Split[4]
+        uri_Stem = re.sub(r'[\[\]]', '', Split[4].strip())
+
+        response_Time = Split[17]
 
         server_Bytes = Split[15]
 
         client_Bytes = Split [16]
 
-        Status_code = Split[12]
-
-        # create line of text to write to output file, made up of the following: Date,Time,Browser,IP,ResponseTime
-        Out = Split[0] + "," + Split[1] + "," + Browser + "," + Split[8] + "," + Split[16] + "," + uriStem + "," + server_Bytes + "," + client_Bytes + "," + Status_code + "\n"
-
+        status_Code = Split[12]
+     
+        Outputline = ",".join([
+            Split[0].strip(),        # Date
+            Split[1].strip(),        # Time
+            Browser,                 # cleaned user agent
+            Split[8].strip(),        # IP
+            response_Time,           
+            uri_Stem,                # URI
+            server_Bytes,            
+            client_Bytes,            
+            status_Code              # sc-status
+        ])
         # write line of text to output file
-        OutFact1.write(Out)
+        OutFact1.write(Outputline + "\n")
 
 # build the fact table
 def BuildFactTable():
     # write header row into the fact table
     with open(StagingArea + 'FactTable.txt', 'w') as file:
-        file.write("Date,Time,Browser,IP,ResponseTime,File,client_Bytes,Server_Bytes,StatusCode\n")
+        file.write("Date,Time,Browser,IP,ResponseTime,File,client_Bytes,Server_Bytes,Status\n")
 
     # add / append data from 14-col log files into Fact table
     Add14ColDataToFactTable()
@@ -443,7 +474,7 @@ def makeLocationDimension():
     # Ensure we can write to DimIPLoc.txt
     try:
         with open(DimTablename, 'w') as file:
-            file.write("IP, country_code, country_name, city, postal, lat, long\n")
+            file.write("IP, country_code, country_name, city, postal\n")
         os.chmod(DimTablename, 0o777)
     except OSError:
         logging.error(f"Cannot write to {DimTablename}. Check file permissions.")
@@ -461,7 +492,23 @@ def makeLocationDimension():
             result = result.split("(")[1].strip(")")
             result = json.loads(result)
 
-            return f"{ip},{result.get('country_code', '')},{result.get('country_name', '')},{result.get('city', '')},{result.get('postal', '')},{result.get('latitude', '')},{result.get('longitude', '')}\n"
+            # Extract fields
+            country_code = result.get('country_code', '')
+            country_name = result.get('country_name', '')
+            city = result.get('city', '')
+            postal = result.get('postal', '')
+
+            # Replace 'Not found' with an empty string so Postgres sees it as NULL
+            if country_code == 'Not found':
+                return country_code == ''
+            if country_name == 'Not found':
+                return country_name == ''
+            if city == 'Not found':
+                return city == ''
+            if postal == 'Not found':
+                return postal == ''
+
+            return f"{ip},{country_code},{country_name},{city},{postal}\n"
         except requests.exceptions.RequestException as e:
             logging.error(f"API request failed for {ip}: {e}")
             return None
@@ -490,27 +537,27 @@ def makeRequestDimension():
     DimTablename = StarSchema + 'DimRequest.txt'
     unique_uris_path = StagingArea + 'UniqueURIStems.txt'
     
-    # ensure the filepath of unique URIs
     if not os.path.exists(unique_uris_path):
         print(f"File {unique_uris_path} not found. Cannot build Request dimension.")
         return
     
-    # Write header
+    # Write header including columns: URIStem as primary key and FileType
     with open(DimTablename, 'w') as outfile:
-        outfile.write("Request_key,URIStem\n")
+        outfile.write("uristem,filetype\n")
     
-    # Read each unique URI and assign a key
+    # Read each unique URI and extract file type
     with open(unique_uris_path, 'r') as infile, open(DimTablename, 'a') as outfile:
-        Request_key = 1
         for line in infile:
             uri = line.strip()
             if uri:
-                # Write surrogate key + the URI
-                out_line = f"{Request_key},{uri}\n"
+                # Extract the file extension (if any)
+                _, file_ext = os.path.splitext(uri)
+                out_line = f"{uri},{file_ext}\n"
                 outfile.write(out_line)
-                Request_key += 1
+                
+    print("Dimension Table created for requests")
 
-    print("Request Dimension Table created.")
+    
 
 def makeStatusDimension():
     DimTablename = StarSchema + 'DimStatusCode.txt'
@@ -521,26 +568,91 @@ def makeStatusDimension():
         return
     
     # Write header row for the dimension table
+    status_descriptions = {
+        "200": "OK",
+        "206": "Partial Content",
+        "302": "Found (Redirect)",
+        "304": "Not Modified",
+        "403": "Forbidden",
+        "404": "Not Found",
+        "405": "Method Not Allowed",
+        "406": "Not Acceptable",
+        "500": "Internal Server Error"
+    }
+
+    # Write header row for the dimension table
     with open(DimTablename, 'w') as outfile:
-        outfile.write("Status_key,sc-status\n")
-    
+        outfile.write("status,description\n")
+
     # Read each unique status and assign a key
     with open(unique_status_path, 'r') as infile, open(DimTablename, 'a') as outfile:
-        Status_key = 1
         for line in infile:
             status = line.strip()
             if status:
-                out_line = f"{Status_key},{status}\n"
+                description = status_descriptions.get(status, "Unknown")
+                out_line = f"{status},{description}\n"
                 outfile.write(out_line)
-                Status_key += 1
-    print("Status Dimension Table created.")
 
+    print("Status Dimension Table created with descriptions.")
+
+def clean_fact_table():
+
+    input_file = StagingArea + 'FactTable.txt'
+    output_file = StarSchema + 'FactTable_Cleaned.txt'
+
+    with open(input_file, 'r') as infile, open(output_file, 'w') as outfile:
+        for line in infile:
+            cleaned_line = re.sub(r',+', ',', line.strip())  # Remove extra commas
+            outfile.write(cleaned_line + "\n")
+
+    print(f"Cleaned Fact Table saved to {output_file}")
+# LOADING DATA TO POSTGRESQL DATABASE
+
+def load_fact_table():
+    # Hook to connect to Postgres via 'my_postgres_conn' 
+    pg_hook = PostgresHook(postgres_conn_id='my_postgres_conn')
+    # The COPY command to load data into your 'fact_table' from a CSV (text) file
+    sql = (
+            "COPY fact_table(\"date\",time,browser,ip,responsetime,file,client_bytes,server_bytes,status)"
+            "FROM STDIN WITH CSV HEADER NULL ''"
+        )
+    filename = StarSchema + 'FactTable_Cleaned.txt'
+    pg_hook.copy_expert(sql, filename)
+    print("Fact table loaded.")
+
+def load_date_dimension():
+    pg_hook = PostgresHook(postgres_conn_id='my_postgres_conn')
+    sql = "COPY dimdatetable(\"Date\", Year, Month, Day, DayofWeek) FROM STDIN WITH CSV HEADER NULL ''"
+    filename = StarSchema + 'DimDateTable.txt'
+    pg_hook.copy_expert(sql, filename)
+    print("Date dimension loaded.")
+
+def load_location_dimension():
+    pg_hook = PostgresHook(postgres_conn_id='my_postgres_conn')
+    sql = "COPY dimiploc FROM STDIN WITH CSV HEADER NULL ''"
+    filename = StarSchema + 'DimIPLoc.txt'
+    pg_hook.copy_expert(sql, filename)
+    print("Location dimension loaded.")
+
+def load_request_dimension():
+    pg_hook = PostgresHook(postgres_conn_id='my_postgres_conn')
+    sql = "COPY dimrequest(uristem, filetype) FROM STDIN WITH CSV HEADER"
+    filename = StarSchema + 'DimRequest.txt'
+    pg_hook.copy_expert(sql, filename)
+    print("Request dimension loaded.")
+
+def load_status_dimension():
+    pg_hook = PostgresHook(postgres_conn_id='my_postgres_conn')
+    sql = "COPY dimstatuscode(status, description) FROM STDIN WITH CSV HEADER DELIMITER ',' QUOTE '\"'"
+    filename = StarSchema + 'DimStatusCode.txt'
+    pg_hook.copy_expert(sql, filename)
+    print("Status dimension loaded.")
 
 
 # the DAG - required for Apache Airflow
 dag = DAG(                                                     
    dag_id="Process_W3_Data",                          
-   schedule_interval="@daily",                                     
+   schedule_interval="@once",                                     
    start_date=dt.datetime(2023, 2, 24), 
    catchup=False,
 )
@@ -654,31 +766,50 @@ task_copyFactTable = BashOperator(
 #     bash_command="cp /home/airflow/gcs/data/Staging/OutFact1.txt /home/airflow/gcs/data/StarSchema/OutFact1.txt",
     dag=dag,
 )
- 
-# usually, you can set up your ETL pipeline as follows, where each task follows on from the previous, one after another:
-# task1 >> task2 >> task3  
 
-# if you want to have tasks working together in parallel (e.g., if we wanted the IP address processing
-# to be occurring at the same time as the Date processing was occurring), we need to define the 
-# pipeline in a different way, making clear which tasks are 'downstream' of each other (occurring after) 
-# or 'upstream' of each other (required to occur before)
-# for example, we could define a structure as follows:
-#
-#                                                        -> task_getDatesFromFactTable -> task_makeUniqueDates -> task_makeDateDimension
-# task_CopyLogFilesToStagingArea -> task_BuildFactTable                                                                                     -> task_copyFactTable
-#                                                        -> task_getIPsFromFactTable -> task_makeUniqueIPs -> task_makeLocationDimension
-#
-# In the above, we could say the following: task_copyFactTable is 'downstream' of task_makeDateDimension
-# OR, we could say that task_makeDateDimension is 'upstream' of task_copyFactTable
-# 
-# There are methods we can call to set up these dependencies. E.g., for the above, we could do:
-# task_copyFactTable.set_upstream(task_makeDateDimension)
-# OR
-# task_makeDateDimension.set_downstream(task_copyFactTable)
-#
-# If TaskA has both TaskB and TaskC upstream of it, TaskA will only commence when BOTH TaskB and TaskC have completed before it.
-#
-# setting up the tasks below, working back from right to left:
+task_clean_fact_table = PythonOperator(
+    task_id="task_clean_fact_table",
+    python_callable=clean_fact_table,
+    dag=dag,
+)
+
+# LOAD DATA TO DATABASE DAGS
+
+task_load_fact_table = PythonOperator(
+    task_id='task_load_fact_table',
+    python_callable=load_fact_table,
+    dag=dag,
+)
+
+task_load_date_dimension = PythonOperator(
+    task_id='task_load_date_dimension',
+    python_callable=load_date_dimension,
+    dag=dag,
+)
+
+task_load_location_dimension = PythonOperator(
+    task_id='task_load_location_dimension',
+    python_callable=load_location_dimension,
+    dag=dag,
+)
+
+task_load_request_dimension = PythonOperator(
+    task_id='task_load_request_dimension',
+    python_callable=load_request_dimension,
+    dag=dag,
+)
+
+task_load_status_dimension = PythonOperator(
+    task_id='task_load_status_dimension',
+    python_callable=load_status_dimension,
+    dag=dag,
+)
+
+#task_create_fact_table.set_upstream(task_copyFactTable)
+#task_create_dim_date.set_upstream(task_copyFactTable)
+#task_create_dim_iploc.set_upstream(task_copyFactTable)
+#task_create_dim_status.set_upstream(task_copyFactTable)
+#task_create_dim_request.set_upstream(task_copyFactTable)
 
 task_copyFactTable.set_upstream(task_makeDateDimension)
 task_copyFactTable.set_upstream(task_makeLocationDimension)
@@ -701,3 +832,12 @@ task_getURIStemsFromFactTable.set_upstream(task_BuildFactTable)
 task_getStatusFromFactTable.set_upstream(task_BuildFactTable)
 
 task_BuildFactTable.set_upstream(task_CopyLogFilesToStagingArea)
+
+task_copyFactTable.set_upstream(task_BuildFactTable)
+task_clean_fact_table.set_upstream(task_copyFactTable)
+# Make sure the fact table CSV is copied before we load it into Postgres
+task_load_fact_table.set_upstream(task_clean_fact_table)
+task_load_date_dimension.set_upstream(task_makeDateDimension)
+task_load_location_dimension.set_upstream(task_makeLocationDimension)
+task_load_request_dimension.set_upstream(task_makeRequestDimension)
+task_load_status_dimension.set_upstream(task_makeStatusDimension)
