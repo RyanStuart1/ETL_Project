@@ -15,7 +15,7 @@
 > Additionally, the listening of the server to make it compatible with Airflow from my WSL was set to `Listen_address = "*"`
 
 > [!CAUTION]
-> The IP address should be set to the IP of the VM running Airflow for security.
+> The IP address should be set to the IP of the VM running Airflow for security in a development environment.
 
 
 
