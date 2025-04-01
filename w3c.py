@@ -28,18 +28,34 @@ def clean_userAgent(user_agent):
         return "safari"
     elif "edge" in ua:
         return "edge"
-    elif "googlebot" in ua:
-        return "googlebot"
-    elif "bingbot" in ua:
-        return "bingbot"
+    elif "google" in ua:
+        return "google"
+    elif "bing" in ua:
+        return "bing"
     elif "yandex" in ua:
-        return "yandexbot"
-    elif "Orgybybot":
-        return "Orgybot"
+        return "yandex"
+    elif "orgybybot" in ua:
+        return "orgybot"
     elif "mozilla" in ua:
         return "mozilla"
+    elif "acquia-crawler" in ua:
+        return "acquia-crawler"
+    elif "sosospider" in ua:
+        return "sosospider"
+    elif "opera" in ua:
+        return "opera"
+    elif "yeti" in ua:
+        return "yeti"
+    elif "yacybot" in ua:
+        return "yacybot"
+    elif "topyx-crawler" in ua:
+        return "topyx-crawler"
+    elif "terraspider" in ua:
+        return "terraspider"
+    elif "morfeus+fucking+scanner" in ua:
+        return "morfeus+fucking+scanner"  
     else:
-        return ua.split(" ")[0]
+        return "other" 
 
 # define (local) folders where files will be found / copied / staged / written
 WorkingDirectory = "/home/ryan/w3c"
@@ -54,7 +70,7 @@ uniqIPsCommand = "sort -u " + StagingArea + "RawIPAddresses.txt > " + StagingAre
 # Another BASH command, this time to extract unique Date values from one file into another
 uniqDatesCommand = "sort -u " + StagingArea + "RawDates.txt > " + StagingArea + "UniqueDates.txt"
 
-# BASH command for file paths
+# BASH command for file paths/URI
 uniqURICommand = "sort -u " + StagingArea + "RawURIStems.txt > " + StagingArea + "UniqueURIStems.txt"
 
 # BASH command for status of requests
@@ -199,16 +215,23 @@ def Add14ColDataToFactTable():
 
         # among other things, the line of data has the following: Date,Time,Browser,IP,ResponseTime
         # do some reformatting of the browser field if required, to remove ',' chars from it
+
+        # Takes user agent (web browser)
         User_agent = Split[9].replace(",","")
 
+        # Variable Browser applies the clean_userAgent function to the variable User_agent, which returns the browser name in the list.
+        # if not in the list it returns other.
         Browser = clean_userAgent(User_agent)
 
+
+        # Removes the brackets with in uristems as some value have unexpected values which need to be cleaned.
+        # They are replaced with an empty string.
         uri_Stem = re.sub(r'[\[\]]', '', Split[4].strip())
         uri_Stem_cleaned = uri_Stem.split(',')[0].strip()
 
         status_Code = Split[10]
 
-        # create line of text to write to output file, made up of the following: Date,Time,Browser,IP,ResponseTime
+        # create line of text to write to output file, made up of the following: Date,Time,Browser,IP,ResponseTime, URI, Cliney Bytes, Server Bytes and Status code.
         OutputLine = ",".join([
             Split[0].strip(),                # Date
             Split[1].strip(),                # Time
@@ -241,13 +264,20 @@ def Add18ColDataToFactTable():
         
         Split = line.split(" ")
 
-        # do some reformatting of the browser field
+        
         User_agent = Split[9].replace(",","")
 
+        # Variable Browser applies the clean_userAgent function to the variable User_agent, which returns the browser name in the list.
+        # if not in the list it returns other.
         Browser = clean_userAgent(User_agent)
 
+        
+        # Removes the brackets with in uristems as some value have unexpected values which need to be cleaned.
+        # They are replaced with an empty string.
         uri_Stem = re.sub(r'[\[\]]', '', Split[4].strip())
 
+
+        #No manipulations required just to return the variables from their expected indexes.
         response_Time = Split[17]
 
         server_Bytes = Split[15]
@@ -261,10 +291,10 @@ def Add18ColDataToFactTable():
             Split[1].strip(),        # Time
             Browser,                 # cleaned user agent
             Split[8].strip(),        # IP
-            response_Time,           
+            response_Time,           # Response time
             uri_Stem,                # URI
-            server_Bytes,            
-            client_Bytes,            
+            server_Bytes,            # Server bytes
+            client_Bytes,            # Client bytes
             status_Code              # sc-status
         ])
         # write line of text to output file
@@ -448,7 +478,6 @@ def makeDateDimension():
 
 
 
-
 def makeLocationDimension():
     """Fetch geolocation data for unique IPs in parallel and store the results."""
     DimTablename = StarSchema + 'DimIPLoc.txt'
@@ -475,16 +504,17 @@ def makeLocationDimension():
     try:
         with open(DimTablename, 'w') as file:
             file.write("IP, country_code, country_name, city, postal\n")
-        os.chmod(DimTablename, 0o777)
+        os.chmod(DimTablename, 0o777) # gives correct permissions to write to LocationDimension table.
     except OSError:
         logging.error(f"Cannot write to {DimTablename}. Check file permissions.")
         return
 
     # Function to process an IP
     def fetch_geolocation(ip):
-        """Fetches geolocation data for an IP address."""
+
         url = f'https://geolocation-db.com/jsonp/{ip}'
         try:
+            # bot attempts to fetch ip every 5 seconds to prevent timeouts.
             response = requests.get(url, timeout=5)  
             result = response.content.decode()
 
@@ -513,19 +543,21 @@ def makeLocationDimension():
             logging.error(f"API request failed for {ip}: {e}")
             return None
 
-    # Process IPs in parallel using ThreadPoolExecutor
+    # Process IPs in parallel using ThreadPoolExecutor, as sequentialexecutor in airflow only works with SQLite.
+    # This is a work around to process IPs in parallel.
     max_workers = 10  
     results = []
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_ip = {executor.submit(fetch_geolocation, ip): ip for ip in ip_addresses}
 
+        # Only successful IP addresses with location are appended to the the list of results.
         for future in as_completed(future_to_ip):
             data = future.result()
             if data:
                 results.append(data)
 
-    # Write results to file
+    # Write results to file + logging to show show number of entries in either airflow GUI or WSL command prompt.
     if results:
         with open(DimTablename, 'a') as file:
             file.writelines(results)
@@ -557,8 +589,6 @@ def makeRequestDimension():
                 
     print("Dimension Table created for requests")
 
-    
-
 def makeStatusDimension():
     DimTablename = StarSchema + 'DimStatusCode.txt'
     unique_status_path = StagingArea + 'UniqueStatus.txt'
@@ -567,7 +597,7 @@ def makeStatusDimension():
         print(f"File {unique_status_path} not found. Cannot build Status dimension.")
         return
     
-    # Write header row for the dimension table
+    # Status codes with their corresponding descriptions.
     status_descriptions = {
         "200": "OK",
         "206": "Partial Content",
@@ -597,6 +627,7 @@ def makeStatusDimension():
 
 def clean_fact_table():
 
+    # Last check, cleaning fact table for any additional commas to ensure data formatting is correct and has the correct number of fields.
     input_file = StagingArea + 'FactTable.txt'
     output_file = StarSchema + 'FactTable_Cleaned.txt'
 
@@ -606,12 +637,14 @@ def clean_fact_table():
             outfile.write(cleaned_line + "\n")
 
     print(f"Cleaned Fact Table saved to {output_file}")
+
 # LOADING DATA TO POSTGRESQL DATABASE
 
 def load_fact_table():
     # Hook to connect to Postgres via 'my_postgres_conn' 
     pg_hook = PostgresHook(postgres_conn_id='my_postgres_conn')
-    # The COPY command to load data into your 'fact_table' from a CSV (text) file
+    # The COPY command to load data into your 'fact_table' from a CSV (text) file with the respective headings. 
+    # The same follows for all the other loading commands, if they are required to have them.
     sql = (
             "COPY fact_table(\"date\",time,browser,ip,responsetime,file,client_bytes,server_bytes,status)"
             "FROM STDIN WITH CSV HEADER NULL ''"
@@ -763,7 +796,6 @@ task_makeUniqueStatus = BashOperator(
 task_copyFactTable = BashOperator(
     task_id="task_copyFactTable",
     bash_command=copyFactTableCommand,
-#     bash_command="cp /home/airflow/gcs/data/Staging/OutFact1.txt /home/airflow/gcs/data/StarSchema/OutFact1.txt",
     dag=dag,
 )
 
@@ -805,12 +837,6 @@ task_load_status_dimension = PythonOperator(
     dag=dag,
 )
 
-#task_create_fact_table.set_upstream(task_copyFactTable)
-#task_create_dim_date.set_upstream(task_copyFactTable)
-#task_create_dim_iploc.set_upstream(task_copyFactTable)
-#task_create_dim_status.set_upstream(task_copyFactTable)
-#task_create_dim_request.set_upstream(task_copyFactTable)
-
 task_copyFactTable.set_upstream(task_makeDateDimension)
 task_copyFactTable.set_upstream(task_makeLocationDimension)
 task_copyFactTable.set_upstream(task_makeRequestDimension)
@@ -835,7 +861,6 @@ task_BuildFactTable.set_upstream(task_CopyLogFilesToStagingArea)
 
 task_copyFactTable.set_upstream(task_BuildFactTable)
 task_clean_fact_table.set_upstream(task_copyFactTable)
-# Make sure the fact table CSV is copied before we load it into Postgres
 task_load_fact_table.set_upstream(task_clean_fact_table)
 task_load_date_dimension.set_upstream(task_makeDateDimension)
 task_load_location_dimension.set_upstream(task_makeLocationDimension)
